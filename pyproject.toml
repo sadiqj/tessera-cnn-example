@@ -1,0 +1,18 @@
+[project]
+name = "geotessera-solarfarm"
+version = "0.1.0"
+description = "Query and process solar farm data from OpenStreetMap"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31.0",
+    "geojson>=3.0.0",
+    "geotessera>=0.7.1",
+    "torch>=2.9.1",
+    "torchvision>=0.24.1",
+    "rasterio>=1.4.3",
+    "shapely>=2.1.2",
+    "pyproj>=3.7.2",
+    "scikit-learn>=1.7.2",
+    "matplotlib>=3.10.7",
+    "tqdm>=4.67.1",
+]
