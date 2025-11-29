@@ -4,17 +4,13 @@ Predict solar farms in a geographic region.
 
 This script fetches a GeoTessera mosaic for a bounding box and runs
 sliding window inference to detect solar farms.
-
-Usage:
-    python predict.py --bbox "-0.5,51.8,0.0,52.1" --model models/solar_unet.pth
-    python predict.py --bbox "-0.5,51.8,0.0,52.1" --model models/solar_unet.pth --output outputs/prediction.png
 """
 
-import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import rasterio
 import torch
 from tqdm import tqdm
 
@@ -22,14 +18,17 @@ from geotessera import GeoTessera
 from models import UNetSmall
 
 # Settings
+BBOX = (-0.5, 51.8, 0.0, 52.1)  # (min_lon, min_lat, max_lon, max_lat)
+MODEL_PATH = "models/solar_unet.pth"
+OUTPUT_PATH = "outputs/prediction.png"
 PATCH_SIZE = 64
 STRIDE = 32
 YEAR = 2024
 THRESHOLD = 0.5
 
 
-def predict_mosaic(model, mosaic: np.ndarray, device) -> np.ndarray:
-    """Run sliding window inference on a mosaic."""
+def predict_mosaic(model, mosaic: np.ndarray, device, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
+    """Run sliding window inference on a mosaic using global normalization stats."""
     h, w, _ = mosaic.shape
 
     prediction = np.zeros((h, w), dtype=np.float32)
@@ -46,16 +45,15 @@ def predict_mosaic(model, mosaic: np.ndarray, device) -> np.ndarray:
                 if np.any(np.isnan(patch)):
                     continue
 
-                # Normalize patch
-                patch_mean = patch.mean(axis=(0, 1), keepdims=True)
-                patch_std = patch.std(axis=(0, 1), keepdims=True) + 1e-8
-                patch_norm = (patch - patch_mean) / patch_std
+                # Normalize using global stats from training set
+                patch_norm = (patch - mean) / std
 
                 # Convert to tensor and predict
                 patch_tensor = torch.from_numpy(patch_norm).float().permute(2, 0, 1).unsqueeze(0)
                 patch_tensor = patch_tensor.to(device)
 
                 output = model(patch_tensor)
+                output = torch.sigmoid(output)
                 pred = output[0, 0].cpu().numpy()
 
                 # Accumulate predictions
@@ -63,32 +61,24 @@ def predict_mosaic(model, mosaic: np.ndarray, device) -> np.ndarray:
                 count[y : y + PATCH_SIZE, x : x + PATCH_SIZE] += 1
 
     # Average overlapping predictions
-    prediction = np.divide(prediction, count, where=count > 0)
+    np.divide(prediction, count, where=count > 0, out=prediction)
     return prediction
 
 
-def main(bbox_str: str, model_path: str, output_path: str):
+def main():
     """Predict solar farms in a region."""
-    # Parse bounding box
-    try:
-        coords = [float(x) for x in bbox_str.split(",")]
-        if len(coords) != 4:
-            raise ValueError
-        min_lon, min_lat, max_lon, max_lat = coords
-        bbox = (min_lon, min_lat, max_lon, max_lat)
-    except Exception:
-        print("Invalid bbox format. Expected 'min_lon,min_lat,max_lon,max_lat'")
-        return
-
-    print(f"Bounding box: {bbox}")
+    print(f"Bounding box: {BBOX}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Load model
-    model_file = Path(model_path)
+    # Load model and extract normalization stats from checkpoint
+    model_file = Path(MODEL_PATH)
     print(f"Loading model from {model_file}...")
     checkpoint = torch.load(model_file, map_location=device, weights_only=False)
+
+    mean = np.array(checkpoint["mean"], dtype=np.float32)
+    std = np.array(checkpoint["std"], dtype=np.float32)
 
     model = UNetSmall(in_channels=128, out_channels=1)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -99,8 +89,8 @@ def main(bbox_str: str, model_path: str, output_path: str):
     gt = GeoTessera()
 
     try:
-        mosaic, _, _ = gt.fetch_mosaic_for_region(
-            bbox=bbox, year=YEAR, target_crs="EPSG:4326", auto_download=True
+        mosaic, crs, mosaic_transform = gt.fetch_mosaic_for_region(
+            bbox=BBOX, year=YEAR, target_crs="EPSG:4326", auto_download=True
         )
     except Exception as e:
         print(f"Failed to fetch mosaic: {e}")
@@ -109,21 +99,38 @@ def main(bbox_str: str, model_path: str, output_path: str):
     print(f"Mosaic shape: {mosaic.shape}")
 
     # Run prediction
-    prediction = predict_mosaic(model, mosaic, device)
+    prediction = predict_mosaic(model, mosaic, device, mean, std)
 
     # Save visualization
-    output_file = Path(output_path)
+    output_file = Path(OUTPUT_PATH)
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     plt.figure(figsize=(12, 10))
     plt.imshow(prediction, cmap="hot", vmin=0, vmax=1)
     plt.colorbar(label="Solar farm probability")
-    plt.title(f"Prediction for {bbox}")
+    plt.title(f"Prediction for {BBOX}")
     plt.axis("off")
     plt.savefig(output_file, dpi=200, bbox_inches="tight")
     plt.close()
 
     print(f"Prediction saved to: {output_file}")
+
+    # Save georeferenced GeoTIFF
+    tif_file = output_file.parent / "prediction.tif"
+    with rasterio.open(
+        tif_file,
+        "w",
+        driver="GTiff",
+        height=prediction.shape[0],
+        width=prediction.shape[1],
+        count=1,
+        dtype=np.float32,
+        crs=crs,
+        transform=mosaic_transform,
+    ) as dst:
+        dst.write(prediction, 1)
+
+    print(f"GeoTIFF saved to: {tif_file}")
 
     # Statistics
     binary_pred = prediction > THRESHOLD
@@ -136,10 +143,4 @@ def main(bbox_str: str, model_path: str, output_path: str):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Predict solar farms in a region")
-    parser.add_argument("--bbox", required=True, help="Bounding box: min_lon,min_lat,max_lon,max_lat")
-    parser.add_argument("--model", default="models/solar_unet.pth", help="Model path")
-    parser.add_argument("--output", default="outputs/prediction.png", help="Output image path")
-    args = parser.parse_args()
-
-    main(args.bbox, args.model, args.output)
+    main()

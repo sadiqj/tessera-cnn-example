@@ -4,17 +4,15 @@ Shared model components for solar farm segmentation.
 This module provides:
 - UNetSmall: A compact U-Net architecture for segmentation
 - SolarFarmDataset: PyTorch dataset for loading patches
-- dice_bce_loss: Combined BCE + Dice loss function
-- compute_metrics: Segmentation metrics (IoU, Dice, Precision, Recall, F1)
+- compute_metrics: Segmentation metrics (IoU, Dice, Precision, Recall)
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from sklearn.metrics import precision_recall_fscore_support
 from torch.utils.data import Dataset
 
 
@@ -44,7 +42,7 @@ class DoubleConv(nn.Module):
 class UNetSmall(nn.Module):
     """Small U-Net for segmentation (3 encoder levels)."""
 
-    def __init__(self, in_channels: int = 128, out_channels: int = 1, base_features: int = 32):
+    def __init__(self, in_channels: int = 128, out_channels: int = 1, base_features: int = 32, dropout: float = 0.3):
         super().__init__()
 
         # Encoder
@@ -59,6 +57,7 @@ class UNetSmall(nn.Module):
 
         # Bottleneck
         self.bottleneck = DoubleConv(base_features * 4, base_features * 8)
+        self.dropout = nn.Dropout2d(dropout)
 
         # Decoder
         self.up1 = nn.ConvTranspose2d(base_features * 8, base_features * 4, kernel_size=2, stride=2)
@@ -79,12 +78,13 @@ class UNetSmall(nn.Module):
         enc3 = self.enc3(self.pool2(enc2))
 
         bn = self.bottleneck(self.pool3(enc3))
+        bn = self.dropout(bn)
 
         dec1 = self.dec1(torch.cat([self.up1(bn), enc3], dim=1))
         dec2 = self.dec2(torch.cat([self.up2(dec1), enc2], dim=1))
         dec3 = self.dec3(torch.cat([self.up3(dec2), enc1], dim=1))
 
-        return torch.sigmoid(self.out_conv(dec3))
+        return self.out_conv(dec3)
 
 
 # =============================================================================
@@ -95,28 +95,54 @@ class UNetSmall(nn.Module):
 class SolarFarmDataset(Dataset):
     """Dataset for loading solar farm segmentation patches."""
 
-    def __init__(self, patches_dir: Path, augment: bool = False):
-        self.patches_dir = Path(patches_dir)
+    def __init__(
+        self,
+        patches_dir: Path,
+        stats_path: Path | None = None,
+        augment: bool = False,
+        crop_size: int | None = None,
+        mean: list | np.ndarray | None = None,
+        std: list | np.ndarray | None = None,
+    ):
+        """
+        Args:
+            patches_dir: Directory containing patch .npy files
+            stats_path: Path to stats.json. If None, uses patches_dir/stats.json.
+                        For test/val sets, pass the training set's stats.json path.
+                        Ignored if mean/std are provided explicitly.
+            augment: If True, apply random augmentations (flips, rotations, random crops) during loading.
+            crop_size: If set, randomly crop patches to this size during augmentation.
+                      For validation/test, center crop is used instead.
+            mean: Explicit mean values for normalization (overrides stats_path).
+            std: Explicit std values for normalization (overrides stats_path).
+        """
         self.augment = augment
+        self.crop_size = crop_size
+        self.patches_dir = Path(patches_dir)
 
         # Find all patch files
         self.patch_files = sorted(self.patches_dir.glob("*_emb.npy"))
         if not self.patch_files:
             raise ValueError(f"No patches found in {patches_dir}")
 
-        # Compute normalization stats from a sample
-        self._compute_stats()
+        # Load normalization stats: prioritize explicit values, fall back to stats.json
+        if mean is not None and std is not None:
+            self.mean = np.array(mean, dtype=np.float32)
+            self.std = np.array(std, dtype=np.float32)
+        else:
+            if stats_path is None:
+                stats_path = self.patches_dir / "stats.json"
+            else:
+                stats_path = Path(stats_path)
 
-    def _compute_stats(self):
-        """Compute per-channel mean and std from a sample of patches."""
-        n_samples = min(100, len(self.patch_files))
-        indices = np.random.choice(len(self.patch_files), n_samples, replace=False)
+            if not stats_path.exists():
+                raise ValueError(f"stats.json not found at {stats_path}. Run prepare.py first.")
 
-        samples = [np.load(self.patch_files[i]) for i in indices]
-        data = np.stack(samples, axis=0)  # (N, H, W, C)
+            with open(stats_path) as f:
+                stats = json.load(f)
 
-        self.mean = data.mean(axis=(0, 1, 2))  # (C,)
-        self.std = data.std(axis=(0, 1, 2)) + 1e-8  # (C,)
+            self.mean = np.array(stats["mean"], dtype=np.float32)
+            self.std = np.array(stats["std"], dtype=np.float32)
 
     def __len__(self):
         return len(self.patch_files)
@@ -128,6 +154,36 @@ class SolarFarmDataset(Dataset):
         embedding = np.load(emb_path)  # (H, W, 128)
         mask = np.load(mask_path)  # (H, W)
 
+        # Apply augmentations (before normalization, on numpy arrays)
+        if self.augment:
+            # Random horizontal flip
+            if np.random.random() > 0.5:
+                embedding = np.flip(embedding, axis=1).copy()
+                mask = np.flip(mask, axis=1).copy()
+            # Random vertical flip
+            if np.random.random() > 0.5:
+                embedding = np.flip(embedding, axis=0).copy()
+                mask = np.flip(mask, axis=0).copy()
+            # Random 90-degree rotation (0, 1, 2, or 3 times)
+            k = np.random.randint(0, 4)
+            if k > 0:
+                embedding = np.rot90(embedding, k, axes=(0, 1)).copy()
+                mask = np.rot90(mask, k, axes=(0, 1)).copy()
+
+        # Random crop (training) or center crop (validation/test)
+        if self.crop_size is not None and embedding.shape[0] > self.crop_size:
+            h, w = embedding.shape[:2]
+            if self.augment:
+                # Random crop for training
+                y = np.random.randint(0, h - self.crop_size + 1)
+                x = np.random.randint(0, w - self.crop_size + 1)
+            else:
+                # Center crop for validation/test
+                y = (h - self.crop_size) // 2
+                x = (w - self.crop_size) // 2
+            embedding = embedding[y:y + self.crop_size, x:x + self.crop_size, :]
+            mask = mask[y:y + self.crop_size, x:x + self.crop_size]
+
         # Normalize
         embedding = (embedding - self.mean) / self.std
 
@@ -135,35 +191,7 @@ class SolarFarmDataset(Dataset):
         embedding = torch.from_numpy(embedding).float().permute(2, 0, 1)
         mask = torch.from_numpy(mask).float().unsqueeze(0)  # (1, H, W)
 
-        # Augmentation
-        if self.augment:
-            if np.random.random() > 0.5:
-                embedding = torch.flip(embedding, [2])
-                mask = torch.flip(mask, [2])
-            if np.random.random() > 0.5:
-                embedding = torch.flip(embedding, [1])
-                mask = torch.flip(mask, [1])
-
         return embedding, mask
-
-
-# =============================================================================
-# Loss Function
-# =============================================================================
-
-
-def dice_bce_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Combined BCE and Dice loss."""
-    # BCE loss
-    bce = F.binary_cross_entropy(pred, target)
-
-    # Dice loss
-    pred_flat = pred.view(-1)
-    target_flat = target.view(-1)
-    intersection = (pred_flat * target_flat).sum()
-    dice = 1 - (2 * intersection + 1e-6) / (pred_flat.sum() + target_flat.sum() + 1e-6)
-
-    return 0.5 * bce + 0.5 * dice
 
 
 # =============================================================================
@@ -172,29 +200,22 @@ def dice_bce_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 
 
 def compute_metrics(pred: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> dict:
-    """Compute segmentation metrics: IoU, Dice, Precision, Recall, F1."""
+    """Compute segmentation metrics: IoU, Dice, Precision, Recall.
+
+    Args:
+        pred: Predicted probabilities (already sigmoid-applied)
+        target: Ground truth binary mask
+        threshold: Threshold for binarizing predictions
+    """
     pred_binary = (pred > threshold).float()
+    intersection = (pred_binary * target).sum()
+    pred_sum, target_sum = pred_binary.sum(), target.sum()
+    union = pred_sum + target_sum - intersection
 
-    pred_flat = pred_binary.cpu().numpy().flatten()
-    target_flat = target.cpu().numpy().flatten()
-
-    # IoU
-    intersection = (pred_flat * target_flat).sum()
-    union = pred_flat.sum() + target_flat.sum() - intersection
-    iou = (intersection + 1e-6) / (union + 1e-6)
-
-    # Dice
-    dice = (2 * intersection + 1e-6) / (pred_flat.sum() + target_flat.sum() + 1e-6)
-
-    # Precision, Recall, F1
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        target_flat, pred_flat, average="binary", zero_division=0
-    )
-
+    eps = 1e-6
     return {
-        "iou": float(iou),
-        "dice": float(dice),
-        "precision": float(precision),
-        "recall": float(recall),
-        "f1": float(f1),
+        "iou": float((intersection + eps) / (union + eps)),
+        "dice": float((2 * intersection + eps) / (pred_sum + target_sum + eps)),
+        "precision": float((intersection + eps) / (pred_sum + eps)),
+        "recall": float((intersection + eps) / (target_sum + eps)),
     }
