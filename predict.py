@@ -15,7 +15,7 @@ import torch
 from tqdm import tqdm
 
 from geotessera import GeoTessera
-from models import UNetSmall
+from models import UNet
 
 # Settings
 BBOX = (-0.5, 51.8, 0.0, 52.1)  # (min_lon, min_lat, max_lon, max_lat)
@@ -75,21 +75,18 @@ def main():
     # Load model and extract normalization stats from checkpoint
     model_file = Path(MODEL_PATH)
     print(f"Loading model from {model_file}...")
-    checkpoint = torch.load(model_file, map_location=device, weights_only=False)
+    model, checkpoint = UNet.from_checkpoint(str(model_file), device=str(device))
+    model = model.to(device)
 
     mean = np.array(checkpoint["mean"], dtype=np.float32)
     std = np.array(checkpoint["std"], dtype=np.float32)
-
-    model = UNetSmall(in_channels=128, out_channels=1)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model = model.to(device)
 
     # Fetch mosaic
     print("Fetching GeoTessera mosaic...")
     gt = GeoTessera()
 
     try:
-        mosaic, crs, mosaic_transform = gt.fetch_mosaic_for_region(
+        mosaic, mosaic_transform, crs = gt.fetch_mosaic_for_region(
             bbox=BBOX, year=YEAR, target_crs="EPSG:4326", auto_download=True
         )
     except Exception as e:

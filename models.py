@@ -39,52 +39,154 @@ class DoubleConv(nn.Module):
         return self.conv(x)
 
 
-class UNetSmall(nn.Module):
-    """Small U-Net for segmentation (3 encoder levels)."""
+class UNet(nn.Module):
+    """Configurable U-Net for segmentation.
 
-    def __init__(self, in_channels: int = 128, out_channels: int = 1, base_features: int = 32, dropout: float = 0.3):
+    Args:
+        in_channels: Number of input channels (default: 128 for GeoTessera embeddings)
+        out_channels: Number of output classes (default: 1 for binary segmentation)
+        depth: Number of encoder/decoder stages, range [2, 5] (default: 3)
+        base_features: Number of features in first encoder layer (default: 32)
+        dropout: Dropout rate applied after bottleneck (default: 0.3)
+
+    Channel progression follows: base_features * 2^level pattern.
+    For depth=3, base_features=32: 32 -> 64 -> 128 -> 256 (bottleneck)
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 128,
+        out_channels: int = 1,
+        depth: int = 3,
+        base_features: int = 32,
+        dropout: float = 0.3,
+    ):
         super().__init__()
 
+        if not 2 <= depth <= 5:
+            raise ValueError(f"depth must be in [2, 5], got {depth}")
+
+        # Store config for serialization
+        self._in_channels = in_channels
+        self._out_channels = out_channels
+        self._depth = depth
+        self._base_features = base_features
+        self._dropout = dropout
+
+        # Channel progression: base_features * 2^level
+        # For depth=3: [32, 64, 128, 256] (last is bottleneck)
+        channels = [base_features * (2**i) for i in range(depth + 1)]
+
         # Encoder
-        self.enc1 = DoubleConv(in_channels, base_features)
-        self.pool1 = nn.MaxPool2d(2)
-
-        self.enc2 = DoubleConv(base_features, base_features * 2)
-        self.pool2 = nn.MaxPool2d(2)
-
-        self.enc3 = DoubleConv(base_features * 2, base_features * 4)
-        self.pool3 = nn.MaxPool2d(2)
+        self.encoders = nn.ModuleList()
+        self.pools = nn.ModuleList()
+        prev_ch = in_channels
+        for ch in channels[:-1]:  # All except bottleneck
+            self.encoders.append(DoubleConv(prev_ch, ch))
+            self.pools.append(nn.MaxPool2d(2))
+            prev_ch = ch
 
         # Bottleneck
-        self.bottleneck = DoubleConv(base_features * 4, base_features * 8)
-        self.dropout = nn.Dropout2d(dropout)
+        self.bottleneck = DoubleConv(channels[-2], channels[-1])
+        self.dropout_layer = nn.Dropout2d(dropout)
 
-        # Decoder
-        self.up1 = nn.ConvTranspose2d(base_features * 8, base_features * 4, kernel_size=2, stride=2)
-        self.dec1 = DoubleConv(base_features * 8, base_features * 4)
-
-        self.up2 = nn.ConvTranspose2d(base_features * 4, base_features * 2, kernel_size=2, stride=2)
-        self.dec2 = DoubleConv(base_features * 4, base_features * 2)
-
-        self.up3 = nn.ConvTranspose2d(base_features * 2, base_features, kernel_size=2, stride=2)
-        self.dec3 = DoubleConv(base_features * 2, base_features)
+        # Decoder (reverse order)
+        self.upsamples = nn.ModuleList()
+        self.decoders = nn.ModuleList()
+        for i in range(depth - 1, -1, -1):
+            in_ch = channels[i + 1]
+            out_ch = channels[i]
+            self.upsamples.append(
+                nn.Sequential(
+                    nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True),
+                    nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1),
+                )
+            )
+            # After concat with skip: out_ch * 2
+            self.decoders.append(DoubleConv(out_ch * 2, out_ch))
 
         # Output
         self.out_conv = nn.Conv2d(base_features, out_channels, kernel_size=1)
 
     def forward(self, x):
-        enc1 = self.enc1(x)
-        enc2 = self.enc2(self.pool1(enc1))
-        enc3 = self.enc3(self.pool2(enc2))
+        # Encoder pass - store skip connections
+        skips = []
+        for encoder, pool in zip(self.encoders, self.pools):
+            x = encoder(x)
+            skips.append(x)
+            x = pool(x)
 
-        bn = self.bottleneck(self.pool3(enc3))
-        bn = self.dropout(bn)
+        # Bottleneck
+        x = self.bottleneck(x)
+        x = self.dropout_layer(x)
 
-        dec1 = self.dec1(torch.cat([self.up1(bn), enc3], dim=1))
-        dec2 = self.dec2(torch.cat([self.up2(dec1), enc2], dim=1))
-        dec3 = self.dec3(torch.cat([self.up3(dec2), enc1], dim=1))
+        # Decoder pass - use skip connections in reverse order
+        for upsample, decoder, skip in zip(self.upsamples, self.decoders, reversed(skips)):
+            x = upsample(x)
+            x = torch.cat([x, skip], dim=1)
+            x = decoder(x)
 
-        return self.out_conv(dec3)
+        return self.out_conv(x)
+
+    @property
+    def config(self) -> dict:
+        """Return model configuration for checkpoint saving."""
+        return {
+            "in_channels": self._in_channels,
+            "out_channels": self._out_channels,
+            "depth": self._depth,
+            "base_features": self._base_features,
+            "dropout": self._dropout,
+        }
+
+    @classmethod
+    def from_config(cls, config: dict) -> "UNet":
+        """Create model from configuration dict."""
+        return cls(**config)
+
+    @classmethod
+    def from_checkpoint(cls, path: str, device: str = "cpu") -> tuple["UNet", dict]:
+        """Load model from checkpoint file.
+
+        Returns:
+            Tuple of (model, checkpoint_dict) where checkpoint_dict contains
+            additional data like mean, std, epoch, iou.
+        """
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
+        model = cls.from_config(checkpoint["model_config"])
+        model.load_state_dict(checkpoint["model_state_dict"])
+        return model, checkpoint
+
+    # Preset classmethods for common configurations
+    @classmethod
+    def nano(cls, **kwargs) -> "UNet":
+        """Ultra-lightweight model (~42K params). Depth=2, base=8."""
+        return cls(depth=2, base_features=8, **kwargs)
+
+    @classmethod
+    def tiny(cls, **kwargs) -> "UNet":
+        """Tiny model (~148K params). Depth=2, base=16."""
+        return cls(depth=2, base_features=16, **kwargs)
+
+    @classmethod
+    def small(cls, **kwargs) -> "UNet":
+        """Small model (~2.2M params). Depth=3, base=32. Matches legacy UNetSmall."""
+        return cls(depth=3, base_features=32, **kwargs)
+
+    @classmethod
+    def base(cls, **kwargs) -> "UNet":
+        """Base model (~4.9M params). Depth=3, base=48."""
+        return cls(depth=3, base_features=48, **kwargs)
+
+    @classmethod
+    def medium(cls, **kwargs) -> "UNet":
+        """Medium model (~8.7M params). Depth=4, base=32."""
+        return cls(depth=4, base_features=32, **kwargs)
+
+    @classmethod
+    def large(cls, **kwargs) -> "UNet":
+        """Large model (~19.5M params). Depth=4, base=48."""
+        return cls(depth=4, base_features=48, **kwargs)
 
 
 # =============================================================================

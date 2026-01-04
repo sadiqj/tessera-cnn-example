@@ -36,7 +36,7 @@ from shapely.ops import unary_union
 from tqdm import tqdm
 
 from geotessera import GeoTessera
-from models import UNetSmall
+from models import UNet
 
 # UK bounding box (includes sea for simplicity)
 UK_BBOX = (-8.5, 49.0, 2.0, 61.0)  # (min_lon, min_lat, max_lon, max_lat)
@@ -47,6 +47,7 @@ STRIDE = 32
 DEFAULT_THRESHOLD = 0.5
 DEFAULT_MIN_AREA_M2 = 10000  # 1 hectare
 DEFAULT_BUFFER_M = 20.0  # Merge polygons within 2 pixels of each other
+DEFAULT_MIN_CONFIDENCE = 0.9  # Only include solar farms where we're 90%+ sure on average
 
 # URL for UK boundary (Natural Earth admin 0 countries)
 UK_BOUNDARY_URL = "https://naturalearth.s3.amazonaws.com/10m_cultural/ne_10m_admin_0_countries.zip"
@@ -112,7 +113,7 @@ def predict_tile(
     """Run sliding window inference on a single tile embedding.
 
     Args:
-        model: Loaded UNetSmall model
+        model: Loaded UNet model
         embedding: Tile embedding array (H, W, 128)
         mean, std: Normalization statistics from checkpoint
         device: PyTorch device
@@ -176,6 +177,7 @@ def polygonize_predictions(
     transform,
     threshold: float,
     min_area_m2: float,
+    min_confidence: float,
     year: int,
     tile_key: str,
 ) -> list:
@@ -186,6 +188,7 @@ def polygonize_predictions(
         crs, transform: Georeferencing info
         threshold: Minimum probability for inclusion
         min_area_m2: Minimum polygon area
+        min_confidence: Minimum average confidence for a polygon to be included
         year: Imagery year for properties
         tile_key: Tile identifier for debugging
 
@@ -230,6 +233,10 @@ def polygonize_predictions(
         )
         mean_conf = float(prediction[poly_mask == 1].mean())
 
+        # Skip polygons below minimum confidence threshold
+        if mean_conf < min_confidence:
+            continue
+
         # Transform polygon and centroid to WGS84
         if "4326" not in crs_str and not crs.is_geographic:
             transformer = pyproj.Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
@@ -268,6 +275,7 @@ def process_single_tile(
     output_dir: Path,
     threshold: float,
     min_area_m2: float,
+    min_confidence: float,
 ) -> tuple[bool, str]:
     """Process a single tile: fetch, predict, polygonize, save.
 
@@ -306,6 +314,7 @@ def process_single_tile(
             tile_transform,
             threshold=threshold,
             min_area_m2=min_area_m2,
+            min_confidence=min_confidence,
             year=year,
             tile_key=tile_key,
         )
@@ -496,6 +505,7 @@ def run_inference(
     year: int,
     threshold: float,
     min_area_m2: float,
+    min_confidence: float,
     buffer_m: float,
     skip_merge: bool,
 ):
@@ -505,9 +515,7 @@ def run_inference(
 
     # Load model
     logger.info(f"Loading model from {model_path}...")
-    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-    model = UNetSmall(in_channels=128, out_channels=1)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model, checkpoint = UNet.from_checkpoint(str(model_path), device=str(device))
     model = model.to(device)
     model.eval()
 
@@ -552,6 +560,7 @@ def run_inference(
             output_dir=output_dir,
             threshold=threshold,
             min_area_m2=min_area_m2,
+            min_confidence=min_confidence,
         )
 
         if success:
@@ -619,6 +628,12 @@ def main():
         help="Minimum polygon area in m^2",
     )
     parser.add_argument(
+        "--min-confidence",
+        type=float,
+        default=DEFAULT_MIN_CONFIDENCE,
+        help="Minimum average confidence for a polygon to be included (0-1)",
+    )
+    parser.add_argument(
         "--buffer",
         type=float,
         default=DEFAULT_BUFFER_M,
@@ -638,6 +653,7 @@ def main():
         year=args.year,
         threshold=args.threshold,
         min_area_m2=args.min_area,
+        min_confidence=args.min_confidence,
         buffer_m=args.buffer,
         skip_merge=args.skip_merge,
     )

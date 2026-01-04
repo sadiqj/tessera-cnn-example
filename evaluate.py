@@ -19,7 +19,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from models import UNetSmall, SolarFarmDataset
+from models import UNet, SolarFarmDataset
 
 # Settings
 MODEL_PATH = "models/solar_unet.pth"
@@ -35,10 +35,7 @@ def evaluate(patches_dir: str, output_dir: str = None, export_viz: bool = False)
     # Load model and extract normalization stats from checkpoint
     model_file = Path(MODEL_PATH)
     print(f"Loading model from {model_file}...")
-    checkpoint = torch.load(model_file, map_location=device, weights_only=False)
-
-    model = UNetSmall(in_channels=128, out_channels=1)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model, checkpoint = UNet.from_checkpoint(str(model_file), device=str(device))
     model = model.to(device)
     model.eval()
 

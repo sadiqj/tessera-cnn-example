@@ -5,7 +5,7 @@ Prepare training patches from GeoTessera embeddings.
 This script:
 1. Downloads solar farm polygons from OpenStreetMap (or uses existing GeoJSON)
 2. Filters labels against REPD (Renewable Energy Planning Database) for temporal alignment
-3. Splits data by longitude (left-to-right) into train/val/test (70/15/15)
+3. Splits data using 100km checkerboard pattern into train/val/test (~78/11/11)
 4. Extracts patches from satellite imagery embeddings
 5. Creates train/val/test datasets with balanced positive/negative samples
 """
@@ -332,27 +332,41 @@ def download_osm_solar_farms(country_code: str = "GB", use_cache: bool = True) -
     return filtered
 
 
-def longitude_split(features_list: list) -> dict:
-    """Split features by longitude (left-to-right geographic split)."""
-    # Sort by centroid longitude
-    features_with_lon = []
+def checkerboard_split(features_list: list, cell_size_m: int = 100_000) -> dict:
+    """Split features using a 100km checkerboard pattern in British National Grid.
+
+    Uses a 3x3 repeating pattern where val and test cells are diagonally
+    separated for maximum spatial independence:
+
+        col:  0      1      2
+        row 2: train  val    train
+        row 1: train  train  train
+        row 0: train  test   train
+
+    This ensures each split has geographic coverage across the entire UK,
+    avoiding the bias of longitudinal splits where solar farms cluster
+    in the south/southeast.
+    """
+    SPLIT_PATTERN = [
+        ["train", "test",  "train"],  # row 0 (northing // cell_size % 3 == 0)
+        ["train", "train", "train"],  # row 1
+        ["train", "val",   "train"],  # row 2
+    ]
+
+    transformer = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:27700", always_xy=True)
+    splits = {"train": [], "val": [], "test": []}
+
     for feat in features_list:
         geom = shape(feat["geometry"])
-        lon = geom.centroid.x
-        features_with_lon.append((lon, feat))
+        easting, northing = transformer.transform(geom.centroid.x, geom.centroid.y)
 
-    features_with_lon.sort(key=lambda x: x[0])
-    sorted_features = [f for _, f in features_with_lon]
+        cell_x = int(easting // cell_size_m)
+        cell_y = int(northing // cell_size_m)
 
-    n = len(sorted_features)
-    train_end = int(n * 0.70)
-    val_end = int(n * 0.85)
+        split = SPLIT_PATTERN[cell_y % 3][cell_x % 3]
+        splits[split].append(feat)
 
-    return {
-        "train": sorted_features[:train_end],
-        "val": sorted_features[train_end:val_end],
-        "test": sorted_features[val_end:],
-    }
+    return splits
 
 
 def download_and_split(output_dir: Path, country_code: str = "GB", use_cache: bool = True, filter_by_repd: bool = True):
@@ -379,10 +393,10 @@ def download_and_split(output_dir: Path, country_code: str = "GB", use_cache: bo
         geojson.dump(fc, f)
     print(f"Saved combined dataset to {combined_path}")
 
-    # Split by longitude (left-to-right)
-    splits = longitude_split(features_list)
+    # Split using 100km checkerboard pattern
+    splits = checkerboard_split(features_list)
 
-    print("\nLongitude split (70/15/15):")
+    print("\nCheckerboard split (100km cells, ~78/11/11):")
     for split, split_features in splits.items():
         print(f"  {split}: {len(split_features)} polygons")
         out_path = output_dir / f"{split}_solar_farms.geojson"

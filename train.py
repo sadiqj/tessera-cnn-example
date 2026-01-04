@@ -2,7 +2,7 @@
 """
 Train a segmentation model on prepared patches.
 
-This script trains a small U-Net on patches prepared by prepare.py.
+This script trains a U-Net on patches prepared by prepare.py.
 It uses Binary Cross Entropy (BCE) and Dice loss with early stopping based on validation IoU.
 
 Usage:
@@ -20,7 +20,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from models import UNetSmall, SolarFarmDataset
+from models import UNet, SolarFarmDataset
 
 # Settings
 TRAIN_PATCHES_DIR = "patches/train"
@@ -171,7 +171,7 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
 
     # Create model
-    model = UNetSmall(in_channels=128, out_channels=1)
+    model = UNet.nano(in_channels=128, out_channels=1)
     model = model.to(device)
 
     num_params = sum(p.numel() for p in model.parameters())
@@ -202,6 +202,7 @@ def main():
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
+                "model_config": model.config,
                 "iou": best_iou,
                 "mean": train_dataset.mean.tolist(),
                 "std": train_dataset.std.tolist(),

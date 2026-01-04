@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31.0",
     "geojson>=3.0.0",
-    "geotessera>=0.7.1",
+    "geotessera>=0.7.3",
     "torch>=2.9.1",
     "torchvision>=0.24.1",
     "rasterio>=1.4.3",
@@ -18,4 +18,5 @@ dependencies = [
     "osmnx>=2.0.7",
     "geopandas>=1.0.0",
     "pillow>=10.0.0",
+    "pystac-client>=0.8.0",
 ]
