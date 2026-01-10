@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Solar Farm UMAP Clustering Animation</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/animejs/3.2.1/anime.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+            color: #fff;
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        #container {
+            position: relative;
+            width: 100%;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #header {
+            padding: 20px 40px;
+            background: rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(10px);
+            z-index: 100;
+        }
+
+        h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #00d4ff, #00ff88);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        #stats {
+            display: flex;
+            gap: 30px;
+            font-size: 1em;
+            opacity: 0.8;
+        }
+
+        .stat {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .solar-indicator {
+            width: 12px;
+            height: 12px;
+            background: #00ff88;
+            border-radius: 50%;
+            box-shadow: 0 0 10px #00ff88;
+        }
+
+        .non-solar-indicator {
+            width: 12px;
+            height: 12px;
+            background: #ff6b6b;
+            border-radius: 50%;
+            box-shadow: 0 0 10px #ff6b6b;
+        }
+
+        #visualization {
+            flex: 1;
+            display: flex;
+            position: relative;
+        }
+
+        .view-container {
+            flex: 1;
+            position: relative;
+            padding: 20px;
+        }
+
+        .view-title {
+            position: absolute;
+            top: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 1.5em;
+            font-weight: 600;
+            z-index: 10;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px 20px;
+            border-radius: 10px;
+            backdrop-filter: blur(10px);
+        }
+
+        canvas {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            border-radius: 10px;
+            background: rgba(0, 0, 0, 0.2);
+        }
+
+        #controls {
+            position: absolute;
+            bottom: 40px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 20px;
+            z-index: 100;
+        }
+
+        button {
+            padding: 15px 30px;
+            font-size: 1.1em;
+            background: rgba(0, 212, 255, 0.2);
+            border: 2px solid #00d4ff;
+            color: #fff;
+            border-radius: 50px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            font-weight: 600;
+        }
+
+        button:hover {
+            background: rgba(0, 212, 255, 0.4);
+            transform: scale(1.05);
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.5);
+        }
+
+        button:active {
+            transform: scale(0.95);
+        }
+
+        button.active {
+            background: #00d4ff;
+            box-shadow: 0 0 30px rgba(0, 212, 255, 0.8);
+        }
+
+        #loading {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            transition: opacity 0.5s ease;
+        }
+
+        #loading.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .spinner {
+            width: 60px;
+            height: 60px;
+            border: 4px solid rgba(0, 212, 255, 0.2);
+            border-top: 4px solid #00d4ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        #loading-text {
+            margin-top: 20px;
+            font-size: 1.2em;
+        }
+
+        .divider {
+            width: 2px;
+            background: linear-gradient(180deg, transparent, #00d4ff, transparent);
+            opacity: 0.3;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">
+        <div class="spinner"></div>
+        <div id="loading-text">Loading pixel data...</div>
+    </div>
+
+    <div id="container">
+        <div id="header">
+            <h1>Solar Farm Pixel Clustering with UMAP</h1>
+            <div id="stats">
+                <div class="stat">
+                    <div class="solar-indicator"></div>
+                    <span>Solar Farm: <strong id="solar-count">0</strong> pixels</span>
+                </div>
+                <div class="stat">
+                    <div class="non-solar-indicator"></div>
+                    <span>Non-Solar: <strong id="non-solar-count">0</strong> pixels</span>
+                </div>
+                <div class="stat">
+                    <span>Total Samples: <strong id="total-count">0</strong></span>
+                </div>
+            </div>
+        </div>
+
+        <div id="visualization">
+            <div class="view-container">
+                <div class="view-title">Spatial View (Geographic Position)</div>
+                <canvas id="spatial-canvas"></canvas>
+            </div>
+            <div class="divider"></div>
+            <div class="view-container">
+                <div class="view-title">UMAP Clustering (Feature Space)</div>
+                <canvas id="umap-canvas"></canvas>
+            </div>
+        </div>
+
+        <div id="controls">
+            <button id="animate-btn">Start Animation</button>
+            <button id="reset-btn">Reset</button>
+            <button id="toggle-view">Switch View</button>
+        </div>
+    </div>
+
+    <script>
+        let data = null;
+        let spatialCtx, umapCtx;
+        let spatialCanvas, umapCanvas;
+        let animationState = 'idle'; // idle, animating, clustered
+        let currentView = 'both'; // both, spatial, umap
+
+        // Initialize
+        async function init() {
+            spatialCanvas = document.getElementById('spatial-canvas');
+            umapCanvas = document.getElementById('umap-canvas');
+            spatialCtx = spatialCanvas.getContext('2d');
+            umapCtx = umapCanvas.getContext('2d');
+
+            // Set canvas sizes
+            resizeCanvases();
+            window.addEventListener('resize', resizeCanvases);
+
+            // Load data
+            try {
+                const response = await fetch('umap_clustering.json');
+                data = await response.json();
+
+                // Update stats
+                document.getElementById('solar-count').textContent = data.n_solar;
+                document.getElementById('non-solar-count').textContent = data.n_non_solar;
+                document.getElementById('total-count').textContent = data.n_samples;
+
+                // Hide loading
+                document.getElementById('loading').classList.add('hidden');
+
+                // Initialize points
+                initializePoints();
+                drawInitialState();
+
+            } catch (error) {
+                document.getElementById('loading-text').textContent = 'Error loading data: ' + error.message;
+            }
+
+            // Setup controls
+            document.getElementById('animate-btn').addEventListener('click', startAnimation);
+            document.getElementById('reset-btn').addEventListener('click', reset);
+            document.getElementById('toggle-view').addEventListener('click', toggleView);
+        }
+
+        function resizeCanvases() {
+            const container = document.querySelector('.view-container');
+            const size = Math.min(container.clientWidth, container.clientHeight) * 0.8;
+
+            spatialCanvas.width = size;
+            spatialCanvas.height = size;
+            umapCanvas.width = size;
+            umapCanvas.height = size;
+
+            if (data) drawCurrentState();
+        }
+
+        function initializePoints() {
+            // Normalize spatial coordinates
+            const xs = data.points.map(p => p.x);
+            const ys = data.points.map(p => p.y);
+            const minX = Math.min(...xs);
+            const maxX = Math.max(...xs);
+            const minY = Math.min(...ys);
+            const maxY = Math.max(...ys);
+
+            data.points.forEach(point => {
+                point.spatial_x = (point.x - minX) / (maxX - minX);
+                point.spatial_y = (point.y - minY) / (maxY - minY);
+
+                // Current position (starts at spatial)
+                point.current_x = point.spatial_x;
+                point.current_y = point.spatial_y;
+
+                // Animation properties
+                point.opacity = 0;
+                point.scale = 0;
+            });
+        }
+
+        function drawInitialState() {
+            // Fade in points at spatial positions
+            anime({
+                targets: data.points,
+                opacity: 1,
+                scale: 1,
+                duration: 1500,
+                delay: anime.stagger(2, {from: 'center'}),
+                easing: 'easeOutElastic(1, .8)',
+                update: drawCurrentState
+            });
+        }
+
+        function drawCurrentState() {
+            // Clear canvases
+            spatialCtx.clearRect(0, 0, spatialCanvas.width, spatialCanvas.height);
+            umapCtx.clearRect(0, 0, umapCanvas.width, umapCanvas.height);
+
+            const padding = 40;
+            const spatialWidth = spatialCanvas.width - 2 * padding;
+            const spatialHeight = spatialCanvas.height - 2 * padding;
+            const umapWidth = umapCanvas.width - 2 * padding;
+            const umapHeight = umapCanvas.height - 2 * padding;
+
+            data.points.forEach(point => {
+                // Draw on spatial canvas (flipped Y for geographic coordinates)
+                const sx = padding + point.spatial_x * spatialWidth;
+                const sy = padding + (1 - point.spatial_y) * spatialHeight;
+                drawPoint(spatialCtx, sx, sy, point);
+
+                // Draw on UMAP canvas
+                const ux = padding + point.umap_x * umapWidth;
+                const uy = padding + point.umap_y * umapHeight;
+                drawPoint(umapCtx, ux, uy, point);
+            });
+        }
+
+        function drawPoint(ctx, x, y, point) {
+            if (point.opacity <= 0) return;
+
+            const baseRadius = 3;
+            const radius = baseRadius * point.scale;
+
+            // Color based on classification
+            const color = point.is_solar ? '#00ff88' : '#ff6b6b';
+            const glowColor = point.is_solar ? 'rgba(0, 255, 136, 0.4)' : 'rgba(255, 107, 107, 0.4)';
+
+            // Draw glow
+            ctx.save();
+            ctx.globalAlpha = point.opacity * 0.5;
+            ctx.beginPath();
+            ctx.arc(x, y, radius * 3, 0, Math.PI * 2);
+            ctx.fillStyle = glowColor;
+            ctx.fill();
+            ctx.restore();
+
+            // Draw point
+            ctx.save();
+            ctx.globalAlpha = point.opacity;
+            ctx.beginPath();
+            ctx.arc(x, y, radius, 0, Math.PI * 2);
+            ctx.fillStyle = color;
+            ctx.fill();
+
+            // Bright center
+            ctx.beginPath();
+            ctx.arc(x, y, radius * 0.5, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            ctx.fill();
+            ctx.restore();
+        }
+
+        function startAnimation() {
+            if (animationState === 'animating') return;
+
+            const btn = document.getElementById('animate-btn');
+            btn.classList.add('active');
+            btn.textContent = 'Animating...';
+            animationState = 'animating';
+
+            // Create morphing animation
+            const timeline = anime.timeline({
+                easing: 'easeInOutQuad',
+                complete: () => {
+                    animationState = 'clustered';
+                    btn.classList.remove('active');
+                    btn.textContent = 'Animation Complete';
+                }
+            });
+
+            // Phase 1: Fade out slightly and prepare
+            timeline.add({
+                targets: data.points,
+                scale: 0.8,
+                duration: 500,
+                update: drawCurrentState
+            });
+
+            // Phase 2: Morph to UMAP positions
+            timeline.add({
+                targets: data.points,
+                current_x: (point) => point.umap_x,
+                current_y: (point) => point.umap_y,
+                scale: 1.2,
+                duration: 2000,
+                delay: anime.stagger(3, {from: 'center'}),
+                easing: 'easeInOutCubic',
+                update: drawMorphState
+            });
+
+            // Phase 3: Settle and pulse
+            timeline.add({
+                targets: data.points,
+                scale: [1.2, 1],
+                duration: 800,
+                easing: 'easeOutElastic(1, .6)',
+                update: drawMorphState
+            });
+
+            // Phase 4: Highlight clusters with pulsing animation
+            timeline.add({
+                targets: data.points,
+                scale: (point) => point.is_solar ? [1, 1.3, 1] : [1, 0.8, 1],
+                duration: 1500,
+                easing: 'easeInOutQuad',
+                update: drawMorphState
+            });
+        }
+
+        function drawMorphState() {
+            // Clear canvases
+            spatialCtx.clearRect(0, 0, spatialCanvas.width, spatialCanvas.height);
+            umapCtx.clearRect(0, 0, umapCanvas.width, umapCanvas.height);
+
+            const padding = 40;
+            const width = spatialCanvas.width - 2 * padding;
+            const height = spatialCanvas.height - 2 * padding;
+
+            data.points.forEach(point => {
+                // Spatial view stays at spatial coordinates
+                const sx = padding + point.spatial_x * width;
+                const sy = padding + (1 - point.spatial_y) * height;
+                drawPoint(spatialCtx, sx, sy, point);
+
+                // Morphing view shows interpolation to UMAP
+                const mx = padding + point.current_x * width;
+                const my = padding + point.current_y * height;
+                drawPoint(umapCtx, mx, my, point);
+            });
+        }
+
+        function reset() {
+            animationState = 'idle';
+            const btn = document.getElementById('animate-btn');
+            btn.classList.remove('active');
+            btn.textContent = 'Start Animation';
+
+            // Reset to spatial positions
+            anime({
+                targets: data.points,
+                current_x: (point) => point.spatial_x,
+                current_y: (point) => point.spatial_y,
+                scale: 1,
+                duration: 1000,
+                easing: 'easeInOutQuad',
+                update: drawMorphState
+            });
+        }
+
+        function toggleView() {
+            const views = ['both', 'spatial', 'umap'];
+            const currentIndex = views.indexOf(currentView);
+            currentView = views[(currentIndex + 1) % views.length];
+
+            const spatialContainer = document.querySelector('.view-container:first-child');
+            const divider = document.querySelector('.divider');
+            const umapContainer = document.querySelector('.view-container:last-child');
+
+            switch(currentView) {
+                case 'spatial':
+                    spatialContainer.style.flex = '1';
+                    umapContainer.style.display = 'none';
+                    divider.style.display = 'none';
+                    break;
+                case 'umap':
+                    spatialContainer.style.display = 'none';
+                    divider.style.display = 'none';
+                    umapContainer.style.flex = '1';
+                    break;
+                case 'both':
+                default:
+                    spatialContainer.style.display = 'block';
+                    spatialContainer.style.flex = '1';
+                    divider.style.display = 'block';
+                    umapContainer.style.display = 'block';
+                    umapContainer.style.flex = '1';
+                    break;
+            }
+
+            resizeCanvases();
+        }
+
+        // Start when page loads
+        window.addEventListener('load', init);
+    </script>
+</body>
+</html>
