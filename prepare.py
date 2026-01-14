@@ -5,7 +5,7 @@ Prepare training patches from GeoTessera embeddings.
 This script:
 1. Downloads solar farm polygons from OpenStreetMap (or uses existing GeoJSON)
 2. Filters labels against REPD (Renewable Energy Planning Database) for temporal alignment
-3. Splits data using 100km checkerboard pattern into train/val/test (~78/11/11)
+3. Splits data using 25km checkerboard pattern into train/val/test (~78/11/11)
 4. Extracts patches from satellite imagery embeddings
 5. Creates train/val/test datasets with balanced positive/negative samples
 """
@@ -332,8 +332,8 @@ def download_osm_solar_farms(country_code: str = "GB", use_cache: bool = True) -
     return filtered
 
 
-def checkerboard_split(features_list: list, cell_size_m: int = 100_000) -> dict:
-    """Split features using a 100km checkerboard pattern in British National Grid.
+def checkerboard_split(features_list: list, cell_size_m: int = 25_000) -> dict:
+    """Split features using a 25km checkerboard pattern in British National Grid.
 
     Uses a 3x3 repeating pattern where val and test cells are diagonally
     separated for maximum spatial independence:
@@ -393,10 +393,10 @@ def download_and_split(output_dir: Path, country_code: str = "GB", use_cache: bo
         geojson.dump(fc, f)
     print(f"Saved combined dataset to {combined_path}")
 
-    # Split using 100km checkerboard pattern
+    # Split using 25km checkerboard pattern
     splits = checkerboard_split(features_list)
 
-    print("\nCheckerboard split (100km cells, ~78/11/11):")
+    print("\nCheckerboard split (25km cells, ~78/11/11):")
     for split, split_features in splits.items():
         print(f"  {split}: {len(split_features)} polygons")
         out_path = output_dir / f"{split}_solar_farms.geojson"
